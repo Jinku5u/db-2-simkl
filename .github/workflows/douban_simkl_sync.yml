@@ -2,7 +2,7 @@ name: Douban to Simkl Sync
 
 on:
   schedule:
-    - cron: '0 * * * *' # Run hourly
+    - cron: '7 * * * *' # Run hourly at minute 7 (off-peak to avoid global queue delays)
   workflow_dispatch: # Allow manual trigger
 
 permissions:
