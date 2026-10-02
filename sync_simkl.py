@@ -365,8 +365,67 @@ def resolve_tmdb(title, original_title, imdb_id):
 
     return None, None, None, None
 
+_cached_simkl_token = None
+
+def get_simkl_access_token():
+    """
+    Retrieves a valid Simkl access token.
+    Supports both AUTH V1 static tokens and AUTH V2 tokens with automatic refresh.
+    """
+    global _cached_simkl_token
+    if _cached_simkl_token:
+        return _cached_simkl_token
+
+    client_id = os.environ.get("SIMKL_CLIENT_ID")
+    access_token = os.environ.get("SIMKL_ACCESS_TOKEN")
+    refresh_token = os.environ.get("SIMKL_REFRESH_TOKEN")
+
+    # If access_token is missing but refresh_token is present, refresh immediately
+    if not access_token and refresh_token and client_id:
+        token = refresh_simkl_token(client_id, refresh_token)
+        if token:
+            _cached_simkl_token = token
+            return token
+
+    _cached_simkl_token = access_token
+    return access_token
+
+def refresh_simkl_token(client_id, refresh_token):
+    """
+    Refreshes an AUTH V2 access token using the non-rotating refresh token.
+    """
+    global _cached_simkl_token
+    if not client_id or not refresh_token:
+        return None
+
+    url = "https://api.simkl.com/oauth2/token"
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": refresh_token
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "DoubanToSimklSync/2.0"
+    }
+    try:
+        print("Refreshing Simkl AUTH V2 access token...")
+        resp = requests.post(url, data=payload, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token = data.get("access_token")
+            if new_token:
+                print("Successfully refreshed Simkl access token.")
+                _cached_simkl_token = new_token
+                return new_token
+        print(f"Warning: Failed to refresh Simkl token (Status {resp.status_code}): {resp.text}")
+    except Exception as e:
+        print(f"Error refreshing Simkl token: {e}")
+    return None
+
 def resolve_media_type_via_simkl(imdb_id):
     client_id = os.environ.get("SIMKL_CLIENT_ID")
+    access_token = get_simkl_access_token()
     if not client_id or not imdb_id:
         return None
     url = "https://api.simkl.com/search/id"
@@ -374,11 +433,13 @@ def resolve_media_type_via_simkl(imdb_id):
         "imdb": imdb_id,
         "client_id": client_id,
         "app-name": "douban-to-simkl-sync",
-        "app-version": "1.0"
+        "app-version": "2.0"
     }
     headers = {
-        "User-Agent": "DoubanToSimklSync/1.0"
+        "User-Agent": "DoubanToSimklSync/2.0"
     }
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
     try:
         res = requests.get(url, params=params, headers=headers)
         if res.status_code == 200:
@@ -395,23 +456,28 @@ def resolve_media_type_via_simkl(imdb_id):
 
 def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=None, year=None, rating=None, memo=None, dry_run=False):
     client_id = os.environ.get("SIMKL_CLIENT_ID")
-    access_token = os.environ.get("SIMKL_ACCESS_TOKEN")
+    refresh_token = os.environ.get("SIMKL_REFRESH_TOKEN")
+    access_token = get_simkl_access_token()
     
-    if not dry_run and (not client_id or not access_token):
-        print("Warning: Simkl credentials not provided. Skipping sync.")
+    if not dry_run and not client_id:
+        print("Warning: SIMKL_CLIENT_ID not provided. Skipping sync.")
+        return False
+        
+    if not dry_run and not access_token and not refresh_token:
+        print("Warning: Neither SIMKL_ACCESS_TOKEN nor SIMKL_REFRESH_TOKEN provided. Skipping sync.")
         return False
         
     params = {
         "client_id": client_id or "",
         "app-name": "douban-to-simkl-sync",
-        "app-version": "1.0"
+        "app-version": "2.0"
     }
     
     headers = {
         "Content-Type": "application/json",
         "simkl-api-key": client_id or "",
         "Authorization": f"Bearer {access_token or ''}",
-        "User-Agent": "DoubanToSimklSync/1.0"
+        "User-Agent": "DoubanToSimklSync/2.0"
     }
     
     # Base item object
@@ -465,6 +531,14 @@ def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=Non
     else:
         try:
             res = requests.post(url, headers=headers, params=params, json=payload)
+            # Handle 401 token expiry by refreshing and retrying once
+            if res.status_code == 401 and refresh_token and client_id:
+                print("Simkl access token expired (401). Attempting automatic refresh...")
+                new_token = refresh_simkl_token(client_id, refresh_token)
+                if new_token:
+                    headers["Authorization"] = f"Bearer {new_token}"
+                    res = requests.post(url, headers=headers, params=params, json=payload)
+
             if res.status_code in [200, 201]:
                 print(f"Successfully synced {title or 'item'} to Simkl ({action}).")
                 success = True
@@ -500,6 +574,13 @@ def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=Non
         else:
             try:
                 res_rating = requests.post(rating_url, headers=headers, params=params, json=rating_payload)
+                if res_rating.status_code == 401 and refresh_token and client_id:
+                    print("Simkl access token expired on rating call (401). Attempting automatic refresh...")
+                    new_token = refresh_simkl_token(client_id, refresh_token)
+                    if new_token:
+                        headers["Authorization"] = f"Bearer {new_token}"
+                        res_rating = requests.post(rating_url, headers=headers, params=params, json=rating_payload)
+
                 if res_rating.status_code in [200, 201]:
                     print(f"Successfully added rating {rating} for {title or 'item'}.")
                 else:

@@ -31,6 +31,7 @@ jobs:
           TMDB_BEARER_TOKEN: ${{ secrets.TMDB_BEARER_TOKEN }}
           SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
           SIMKL_ACCESS_TOKEN: ${{ secrets.SIMKL_ACCESS_TOKEN }}
+          SIMKL_REFRESH_TOKEN: ${{ secrets.SIMKL_REFRESH_TOKEN }}
         run: python sync_simkl.py
 
       - name: Commit and push changes

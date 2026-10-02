@@ -41,38 +41,24 @@ This repository contains two independent, automatic synchronization tools powere
 ---
 
 ### 2. Configure Simkl Sync (Optional)
-If you want to sync to Simkl, complete these steps:
+If you want to sync to Simkl, complete these quick steps using modern **Simkl AUTH V2**:
 
-1. **Create a Simkl Developer App**:
-   - Go to [Simkl Developer Settings](https://simkl.com/settings/developer/new/).
-   - Set **Redirect URI** to `http://localhost`.
-   - Save to get your **Client ID** and **Client Secret**.
-2. **Obtain your Simkl Access Token** (Choose one):
-   * **Method A (Web Console)**:
-     1. Open in browser: `https://simkl.com/oauth/authorize?response_type=code&client_id=YOUR_CLIENT_ID&redirect_uri=http://localhost`
-     2. Authorize, then copy the code from the redirected URL `http://localhost/?code=YOUR_CODE`.
-     3. Open any webpage, press `F12` to open the Developer Console, and run:
-        ```javascript
-        fetch('https://api.simkl.com/oauth/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            code: "YOUR_COPIED_CODE",
-            client_id: "YOUR_CLIENT_ID",
-            client_secret: "YOUR_CLIENT_SECRET",
-            redirect_uri: "http://localhost",
-            grant_type: "authorization_code"
-          })
-        }).then(res => res.json()).then(console.log);
-        ```
-     4. Copy the resulting `"access_token"`.
-   * **Method B (Python Script)**:
-     - Run `python get_token.py` locally and follow the interactive prompts.
+1. **Create a Simkl AUTH V2 App**:
+   - Go to [Simkl Developer Settings](https://simkl.com/settings/developer/).
+   - Click **Create an AUTH V2 app**.
+   - Select **TV, devices & command line** (Client ID only, no Client Secret or Redirect URL needed!).
+   - Enter an app name (e.g. `Douban Sync`) and save to get your **Client ID**.
+2. **Obtain Simkl Tokens (One-Click Flow)**:
+   - Run `python get_token.py` locally and paste your **Client ID**.
+   - Your browser will automatically open with the authorization code pre-filled.
+   - Click **Allow / Approve** on Simkl.
+   - The script will instantly detect approval and output your `SIMKL_ACCESS_TOKEN` and `SIMKL_REFRESH_TOKEN`.
 3. **Save Simkl Secrets**:
    Go to your GitHub repo -> `Settings > Secrets and variables > Actions > New repository secret` and add:
    - `TMDB_API_KEY`: Your TMDB API Key (Free at [TMDB](https://www.themoviedb.org/)).
    - `SIMKL_CLIENT_ID`: Your Simkl Client ID.
-   - `SIMKL_ACCESS_TOKEN`: The Simkl Access Token you generated.
+   - `SIMKL_ACCESS_TOKEN`: The generated Access Token.
+   - `SIMKL_REFRESH_TOKEN`: The generated Refresh Token (Simkl's refresh tokens are non-rotating with a sliding 180-day window, so your GitHub Action will perpetually refresh tokens automatically with zero maintenance!).
 
 ---
 
