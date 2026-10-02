@@ -32,3 +32,7 @@ Thumbs.db
 
 # Agent recommendation system files
 recommender_system/
+
+# Nested repositories (e.g. friend repo clone)
+db-2-simkl/
+

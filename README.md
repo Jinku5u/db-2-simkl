@@ -32,11 +32,15 @@ This repository contains two independent, automatic synchronization tools powere
 
 ## Setup Guide
 
-### 1. Initial Configuration (Shared)
+### 1. Initial Configuration (One-Click Setup for Forks)
 1. **Fork** this repository to your own GitHub account.
-2. Edit [`config.json`](file:///c:/Users/Barba/Documents/Git/db-2-simkl/config.json) in your repository:
-   - `douban_id`: Change this to your Douban username/ID (found in your Douban homepage URL `https://www.douban.com/people/YOUR_ID/`).
-   - `sync_delay_seconds`: The delay (in seconds) between requests to avoid rate limits.
+2. Go to the **Actions** tab in your forked repository.
+3. Select **"Initialize Repository for New User"** in the left sidebar, click **Run workflow**:
+   - Enter your **Douban User ID** (found in your Douban homepage URL `https://www.douban.com/people/YOUR_ID/`).
+   - Leave `clean_archive` checked (unless you already uploaded your own `douban_archive.jsonl`).
+   - Click **Run workflow**.
+   - *This will automatically clean previous sync history, reset the archive, and configure `config.json` for you within seconds!*
+
 
 ---
 

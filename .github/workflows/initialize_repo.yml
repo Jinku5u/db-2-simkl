@@ -1,0 +1,64 @@
+name: Initialize Repository for New User
+
+on:
+  workflow_dispatch:
+    inputs:
+      douban_id:
+        description: 'Your Douban User ID (number or custom vanity ID)'
+        required: true
+        type: string
+      clean_archive:
+        description: 'Reset douban_archive.jsonl to empty? (Select false if you already provided your own archive)'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Initialize configuration and reset history
+        run: |
+          python -c '
+          import os, json, sys
+
+          douban_id = "${{ inputs.douban_id }}".strip()
+          clean_archive = "${{ inputs.clean_archive }}".lower() == "true"
+
+          if not douban_id:
+              print("Error: douban_id cannot be empty!")
+              sys.exit(1)
+
+          config = {"douban_id": douban_id, "sync_delay_seconds": 2}
+          with open("config.json", "w", encoding="utf-8") as f:
+              json.dump(config, f, indent=2, ensure_ascii=False)
+          print(f"Updated config.json with douban_id: {douban_id}")
+
+          for hf in ["sync_history.json", "sync_history_neodb.json", "sync_history_archive.json"]:
+              with open(hf, "w", encoding="utf-8") as f:
+                  json.dump([], f, indent=2)
+              print(f"Reset {hf} to empty list")
+
+          if clean_archive:
+              with open("douban_archive.jsonl", "w", encoding="utf-8") as f:
+                  pass
+              print("Reset douban_archive.jsonl to empty file")
+          '
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add config.json sync_history.json sync_history_neodb.json sync_history_archive.json douban_archive.jsonl
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: initialize repository for Douban ID ${{ inputs.douban_id }}" && git push)

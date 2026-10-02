@@ -30,13 +30,15 @@ def load_config():
             return json.load(f)
     return {"douban_id": "", "sync_delay_seconds": 2}
 
-def load_history(history_file=HISTORY_FILE):
-    """Load processed event keys from history file."""
+def load_history(history_file=HISTORY_FILE, douban_id=None):
+    """Load processed event keys from history file, filtering out other accounts if douban_id is set."""
     if os.path.exists(history_file):
         try:
             with open(history_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
+                    if douban_id:
+                        data = [k for k in data if f"/people/{douban_id}/" in k]
                     return data, set(data)
         except Exception:
             pass
@@ -221,7 +223,7 @@ def main():
         print("Error: douban_id is not set in config.json and no local XML is provided.")
         return
 
-    history_list, history_set = load_history(args.history_file)
+    history_list, history_set = load_history(args.history_file, douban_id=douban_id)
     existing_keys = load_existing_archive_keys(args.jsonl_file)
 
     if args.local_xml:

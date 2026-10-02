@@ -25,15 +25,19 @@ def load_config():
             return json.load(f)
     return {"douban_id": "", "sync_delay_seconds": 2}
 
-def load_history(history_file=HISTORY_FILE):
+def load_history(history_file=HISTORY_FILE, douban_id=None):
     """
     Loads sync history as an ordered list of event keys and a lookup set.
+    If douban_id is specified, automatically filters out entries belonging
+    to other Douban accounts to prevent data contamination across forks.
     """
     if os.path.exists(history_file):
         try:
             with open(history_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
+                    if douban_id:
+                        data = [k for k in data if f"/people/{douban_id}/" in k]
                     return data, set(data)
         except Exception as e:
             print(f"Warning: Failed to load history from {history_file}: {e}")
@@ -269,7 +273,7 @@ def main():
         return
         
     delay = config.get("sync_delay_seconds", 2)
-    history_list, history_set = load_history()
+    history_list, history_set = load_history(douban_id=douban_id)
     
     if args.local_xml:
         print(f"Reading local XML file: {args.local_xml}")
