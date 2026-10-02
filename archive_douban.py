@@ -21,6 +21,7 @@ CONFIG_FILE = "config.json"
 HISTORY_FILE = "sync_history_archive.json"
 ARCHIVE_FILE = "douban_archive.jsonl"
 CST = timezone(timedelta(hours=8))
+MAX_HISTORY_ENTRIES = 100
 
 def load_config():
     """Load configuration from config.json."""
@@ -30,16 +31,22 @@ def load_config():
     return {"douban_id": "", "sync_delay_seconds": 2}
 
 def load_history(history_file=HISTORY_FILE):
-    """Load processed guid set from history file."""
+    """Load processed event keys from history file."""
     if os.path.exists(history_file):
-        with open(history_file, 'r', encoding='utf-8') as f:
-            return set(json.load(f))
-    return set()
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data, set(data)
+        except Exception:
+            pass
+    return [], set()
 
-def save_history(history, history_file=HISTORY_FILE):
-    """Save processed guid set to history file."""
+def save_history(history_list, history_file=HISTORY_FILE, max_entries=MAX_HISTORY_ENTRIES):
+    """Save processed event keys to history file with sliding window pruning."""
+    trimmed = history_list[-max_entries:] if len(history_list) > max_entries else history_list
     with open(history_file, 'w', encoding='utf-8') as f:
-        json.dump(sorted(list(history)), f, indent=2, ensure_ascii=False)
+        json.dump(trimmed, f, indent=2, ensure_ascii=False)
 
 def load_existing_archive_keys(jsonl_file=ARCHIVE_FILE):
     """
@@ -214,7 +221,7 @@ def main():
         print("Error: douban_id is not set in config.json and no local XML is provided.")
         return
 
-    history = load_history(args.history_file)
+    history_list, history_set = load_history(args.history_file)
     existing_keys = load_existing_archive_keys(args.jsonl_file)
 
     if args.local_xml:
@@ -240,25 +247,27 @@ def main():
 
     # Process oldest first to keep archive chronological
     for item in reversed(items):
-        guid = item["guid"]
-        if guid in history:
+        event_key = f"{item['guid']}::{item['type']}::{item.get('create_time', '')}"
+        if event_key in history_set:
             continue
 
         item_key = (item["link"], item["type"], item["create_time"])
         if item_key in existing_keys:
             # Already in archive JSONL, mark as seen
-            history.add(guid)
+            history_set.add(event_key)
+            history_list.append(event_key)
             continue
 
         print(f"New item detected: [{item['type']}] {item['title']} ({item['link']})")
         new_records.append(item)
-        history.add(guid)
+        history_set.add(event_key)
+        history_list.append(event_key)
         existing_keys.add(item_key)
 
     if not new_records:
         print("No new watch activities to archive.")
         if not args.dry_run:
-            save_history(history, args.history_file)
+            save_history(history_list, args.history_file)
         return
 
     print(f"Appending {len(new_records)} new records to {args.jsonl_file}...")
@@ -268,7 +277,7 @@ def main():
             print(json.dumps(r, ensure_ascii=False))
     else:
         append_records_to_archive(new_records, args.jsonl_file)
-        save_history(history, args.history_file)
+        save_history(history_list, args.history_file)
         print("Successfully updated archive and history.")
 
 if __name__ == "__main__":

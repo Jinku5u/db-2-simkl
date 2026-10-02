@@ -17,6 +17,7 @@ if sys.stdout.encoding != 'utf-8':
 
 CONFIG_FILE = "config.json"
 HISTORY_FILE = "sync_history_neodb.json"
+MAX_HISTORY_ENTRIES = 100
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -24,15 +25,28 @@ def load_config():
             return json.load(f)
     return {"douban_id": "", "sync_delay_seconds": 2}
 
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-            return set(json.load(f))
-    return set()
+def load_history(history_file=HISTORY_FILE):
+    """
+    Loads sync history as an ordered list of event keys and a lookup set.
+    """
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data, set(data)
+        except Exception as e:
+            print(f"Warning: Failed to load history from {history_file}: {e}")
+    return [], set()
 
-def save_history(history):
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(list(history), f, indent=2, ensure_ascii=False)
+def save_history(history_list, history_file=HISTORY_FILE, max_entries=MAX_HISTORY_ENTRIES):
+    """
+    Saves sync history maintaining chronological insertion order and pruning
+    to the latest max_entries (sliding window) to prevent unbounded growth.
+    """
+    trimmed = history_list[-max_entries:] if len(history_list) > max_entries else history_list
+    with open(history_file, 'w', encoding='utf-8') as f:
+        json.dump(trimmed, f, indent=2, ensure_ascii=False)
 
 def fetch_rss(douban_id):
     url = f"https://www.douban.com/feed/people/{douban_id}/interests"
@@ -58,6 +72,9 @@ def parse_rss(xml_data):
         link_elem = item.find('link')
         link = link_elem.text if link_elem is not None else ""
         
+        pubdate_elem = item.find('pubDate')
+        pubdate = pubdate_elem.text.strip() if pubdate_elem is not None and pubdate_elem.text else ""
+        
         description_elem = item.find('description')
         description = description_elem.text if description_elem is not None else ""
         
@@ -68,6 +85,9 @@ def parse_rss(xml_data):
             title = raw_title[2:]
         elif raw_title.startswith("想看"):
             action = "plantowatch"
+            title = raw_title[2:]
+        elif raw_title.startswith("在看"):
+            action = "watching"
             title = raw_title[2:]
             
         rating = None
@@ -118,7 +138,8 @@ def parse_rss(xml_data):
                 "original_title": original_title,
                 "link": link.strip(),
                 "rating": rating,
-                "memo": memo
+                "memo": memo,
+                "pubdate": pubdate
             })
     return items
 
@@ -187,7 +208,12 @@ def sync_to_neodb(item_uuid, action, instance_domain, access_token, rating=None,
     }
     
     # Map actions
-    shelf_type = "complete" if action == "watched" else "wishlist"
+    if action == "watched":
+        shelf_type = "complete"
+    elif action == "watching":
+        shelf_type = "progress"
+    else:
+        shelf_type = "wishlist"
     
     # Construct payload
     payload = {
@@ -243,7 +269,7 @@ def main():
         return
         
     delay = config.get("sync_delay_seconds", 2)
-    history = load_history()
+    history_list, history_set = load_history()
     
     if args.local_xml:
         print(f"Reading local XML file: {args.local_xml}")
@@ -267,8 +293,8 @@ def main():
     
     # Process oldest first to keep history chronological
     for item in reversed(items):
-        guid = item["guid"]
-        if guid in history:
+        event_key = f"{item['guid']}::{item['action']}::{item.get('pubdate', '')}"
+        if event_key in history_set:
             continue
             
         print(f"\nProcessing item: {item['title']} ({item['action']})")
@@ -292,8 +318,9 @@ def main():
                 dry_run=args.dry_run
             )
             if success and not args.dry_run:
-                history.add(guid)
-                save_history(history)
+                history_set.add(event_key)
+                history_list.append(event_key)
+                save_history(history_list)
             
             # Delay between processing items to respect NeoDB rate limits
             if not args.dry_run:

@@ -19,6 +19,7 @@ if sys.stdout.encoding != 'utf-8':
 
 CONFIG_FILE = "config.json"
 HISTORY_FILE = "sync_history.json"
+MAX_HISTORY_ENTRIES = 100
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -26,15 +27,28 @@ def load_config():
             return json.load(f)
     return {"douban_id": "", "sync_delay_seconds": 2}
 
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-            return set(json.load(f))
-    return set()
+def load_history(history_file=HISTORY_FILE):
+    """
+    Loads sync history as an ordered list of event keys and a lookup set.
+    """
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data, set(data)
+        except Exception as e:
+            print(f"Warning: Failed to load history from {history_file}: {e}")
+    return [], set()
 
-def save_history(history):
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(list(history), f, indent=2, ensure_ascii=False)
+def save_history(history_list, history_file=HISTORY_FILE, max_entries=MAX_HISTORY_ENTRIES):
+    """
+    Saves sync history maintaining chronological insertion order and pruning
+    to the latest max_entries (sliding window) to prevent unbounded growth.
+    """
+    trimmed = history_list[-max_entries:] if len(history_list) > max_entries else history_list
+    with open(history_file, 'w', encoding='utf-8') as f:
+        json.dump(trimmed, f, indent=2, ensure_ascii=False)
 
 def fetch_rss(douban_id):
     url = f"https://www.douban.com/feed/people/{douban_id}/interests"
@@ -60,6 +74,19 @@ def parse_rss(xml_data):
         link_elem = item.find('link')
         link = link_elem.text if link_elem is not None else ""
         
+        pubdate_elem = item.find('pubDate')
+        pubdate = pubdate_elem.text.strip() if pubdate_elem is not None and pubdate_elem.text else ""
+
+        watched_at = None
+        if pubdate:
+            try:
+                from email.utils import parsedate_to_datetime
+                from datetime import timezone
+                dt = parsedate_to_datetime(pubdate)
+                watched_at = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                pass
+        
         description_elem = item.find('description')
         description = description_elem.text if description_elem is not None else ""
         
@@ -70,6 +97,9 @@ def parse_rss(xml_data):
             title = raw_title[2:]
         elif raw_title.startswith("想看"):
             action = "plantowatch"
+            title = raw_title[2:]
+        elif raw_title.startswith("在看"):
+            action = "watching"
             title = raw_title[2:]
             
         rating = None
@@ -120,7 +150,9 @@ def parse_rss(xml_data):
                 "original_title": original_title,
                 "link": link.strip(),
                 "rating": rating,
-                "memo": memo
+                "memo": memo,
+                "pubdate": pubdate,
+                "watched_at": watched_at
             })
     return items
 
@@ -454,7 +486,7 @@ def resolve_media_type_via_simkl(imdb_id):
         print(f"Error querying Simkl ID lookup: {e}")
     return None
 
-def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=None, year=None, rating=None, memo=None, dry_run=False):
+def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=None, year=None, rating=None, memo=None, watched_at=None, dry_run=False):
     client_id = os.environ.get("SIMKL_CLIENT_ID")
     refresh_token = os.environ.get("SIMKL_REFRESH_TOKEN")
     access_token = get_simkl_access_token()
@@ -509,6 +541,8 @@ def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=Non
     
     if action == "watched":
         url = "https://api.simkl.com/sync/history"
+        if watched_at:
+            item_obj["watched_at"] = watched_at
         
         # If it is a show and we have a season number, add it
         if media_type == "show" and season_number is not None:
@@ -519,6 +553,10 @@ def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=Non
     elif action == "plantowatch":
         url = "https://api.simkl.com/sync/add-to-list"
         item_obj["to"] = "plantowatch"
+        payload = {plural_type: [item_obj]}
+    elif action == "watching":
+        url = "https://api.simkl.com/sync/add-to-list"
+        item_obj["to"] = "watching"
         payload = {plural_type: [item_obj]}
     else:
         return False
@@ -603,7 +641,7 @@ def main():
         return
         
     delay = config.get("sync_delay_seconds", 2)
-    history = load_history()
+    history_list, history_set = load_history()
     
     if args.local_xml:
         print(f"Reading local XML file: {args.local_xml}")
@@ -627,8 +665,8 @@ def main():
     
     # Process oldest first to keep history chronological
     for item in reversed(items):
-        guid = item["guid"]
-        if guid in history:
+        event_key = f"{item['guid']}::{item['action']}::{item.get('pubdate', '')}"
+        if event_key in history_set:
             continue
             
         print(f"\nProcessing item: {item['title']} ({item['action']})")
@@ -684,16 +722,19 @@ def main():
                 year=extracted_year,
                 rating=item.get("rating"),
                 memo=item.get("memo"),
+                watched_at=item.get("watched_at"),
                 dry_run=args.dry_run
             )
             if success and not args.dry_run:
-                history.add(guid)
-                save_history(history)
+                history_set.add(event_key)
+                history_list.append(event_key)
+                save_history(history_list)
         else:
             print(f"Could not resolve TMDB ID or IMDb ID for {item['title']}. Skipping Simkl sync.")
             if not args.dry_run:
-                history.add(guid)
-                save_history(history)
+                history_set.add(event_key)
+                history_list.append(event_key)
+                save_history(history_list)
 
 if __name__ == "__main__":
     main()
