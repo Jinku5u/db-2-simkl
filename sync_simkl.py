@@ -291,18 +291,22 @@ def extract_imdb_and_year(douban_link, delay):
         return None, None
 
 def clean_title_for_search(title):
-    season_match = re.search(r'\s*第([一二三四五六七八九十0-9]+)季$', title)
-    season_num = None
+    if not title:
+        return "", None
+    season_match = re.search(r'\s*第([一二三四五六七八九十0-9]+)季\s*$', title)
     if season_match:
         chinese_to_num = {'一':1, '二':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9, '十':10}
         num_str = season_match.group(1)
-        if num_str.isdigit():
-            season_num = int(num_str)
-        elif num_str in chinese_to_num:
-            season_num = chinese_to_num[num_str]
-        
+        season_num = int(num_str) if num_str.isdigit() else chinese_to_num.get(num_str)
         clean_title = title[:season_match.start()].strip()
         return clean_title, season_num
+
+    eng_match = re.search(r'\s*(?:Season|S)\s*([0-9]+)\s*$', title, re.IGNORECASE)
+    if eng_match:
+        season_num = int(eng_match.group(1))
+        clean_title = title[:eng_match.start()].strip()
+        return clean_title, season_num
+
     return title, None
 
 def get_parent_imdb_id(show_id, headers, params):
@@ -490,6 +494,171 @@ def resolve_media_type_via_simkl(imdb_id):
         print(f"Error querying Simkl ID lookup: {e}")
     return None
 
+_cached_simkl_show_memos = None
+
+def parse_show_memos(raw_memo):
+    """
+    Parses a combined show memo formatted as '[s01]: ... ; [s02]: ...' into a dict of {season_num: content}
+    and any leading non-season prefix.
+    """
+    if not raw_memo:
+        return {}, ''
+    pattern = re.compile(r'\[s?(\d+)\]\s*:\s*', re.IGNORECASE)
+    matches = list(pattern.finditer(raw_memo))
+    if not matches:
+        return {}, raw_memo.strip()
+    
+    seasons = {}
+    prefix = raw_memo[:matches[0].start()].strip()
+    for i, m in enumerate(matches):
+        s_num = int(m.group(1))
+        start_idx = m.end()
+        end_idx = matches[i+1].start() if i + 1 < len(matches) else len(raw_memo)
+        content = raw_memo[start_idx:end_idx].strip()
+        content = re.sub(r'\s*;\s*$', '', content).strip()
+        seasons[s_num] = content
+    return seasons, prefix
+
+def fit_memo_to_limit(seasons, prefix='', limit=140):
+    """
+    Formats the season memo dictionary into '[s01]: ... ; [s02]: ...'.
+    If the combined length exceeds the Simkl API limit (140 chars),
+    intelligently trims the longest season reviews so all seasons remain represented.
+    """
+    def build(s_dict, pref):
+        parts = []
+        if pref:
+            parts.append(pref)
+        for s in sorted(s_dict.keys()):
+            parts.append(f"[s{s:02d}]: {s_dict[s]}")
+        return " ; ".join(parts)
+
+    current = build(seasons, prefix)
+    if len(current) <= limit:
+        return current
+
+    s_copy = dict(seasons)
+    while len(build(s_copy, prefix)) > limit:
+        longest_s = max(s_copy.keys(), key=lambda k: len(s_copy[k]))
+        if len(s_copy[longest_s]) <= 6:
+            break
+        s_copy[longest_s] = s_copy[longest_s][:-3].rstrip() + ".."
+        
+    res = build(s_copy, prefix)
+    if len(res) > limit:
+        res = res[:limit-3] + "..."
+    return res
+
+def merge_show_memo(existing_memo, new_memo, season_number):
+    """
+    Merges a new season review into existing show memo without overwriting other seasons.
+    """
+    if not new_memo:
+        return existing_memo
+        
+    cleaned_new = re.sub(r'^\[s?\d+\]\s*:\s*', '', new_memo).strip()
+    s_num = season_number if season_number is not None else 1
+    
+    seasons, prefix = parse_show_memos(existing_memo)
+    if not seasons and prefix:
+        if s_num == 1:
+            prefix = ''
+        else:
+            seasons[1] = prefix
+            prefix = ''
+            
+    seasons[s_num] = cleaned_new
+    return fit_memo_to_limit(seasons, prefix, limit=140)
+
+def fetch_all_simkl_show_memos(client_id, access_token):
+    """
+    Fetches user's existing shows and anime with memos from Simkl API.
+    Indexed by imdb, tmdb, simkl IDs and title for fast lookup.
+    """
+    if not client_id or not access_token:
+        return {}
+        
+    url = "https://api.simkl.com/sync/all-items/"
+    params = {
+        "memos": "yes",
+        "client_id": client_id,
+        "app-name": "douban-to-simkl-sync",
+        "app-version": "2.0"
+    }
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "simkl-api-key": client_id,
+        "User-Agent": "DoubanToSimklSync/2.0"
+    }
+    memo_dict = {}
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code == 401:
+            refresh_token = os.environ.get("SIMKL_REFRESH_TOKEN")
+            new_token = refresh_simkl_token(client_id, refresh_token)
+            if new_token:
+                headers["Authorization"] = f"Bearer {new_token}"
+                resp = requests.get(url, headers=headers, params=params, timeout=15)
+                
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict):
+                entries = []
+                if isinstance(data.get("shows"), list):
+                    entries.extend(data["shows"])
+                if isinstance(data.get("anime"), list):
+                    entries.extend(data["anime"])
+                    
+                for entry in entries:
+                    memo_info = entry.get("memo")
+                    memo_text = memo_info.get("text") if isinstance(memo_info, dict) else None
+                    if memo_text:
+                        show = entry.get("show", {})
+                        ids = show.get("ids", {})
+                        imdb_val = ids.get("imdb")
+                        tmdb_val = ids.get("tmdb")
+                        simkl_val = ids.get("simkl")
+                        title_val = show.get("title")
+                        if imdb_val:
+                            memo_dict[f"imdb:{imdb_val}"] = memo_text
+                        if tmdb_val:
+                            memo_dict[f"tmdb:{tmdb_val}"] = memo_text
+                        if simkl_val:
+                            memo_dict[f"simkl:{simkl_val}"] = memo_text
+                        if title_val:
+                            memo_dict[f"title:{title_val.strip().lower()}"] = memo_text
+    except Exception as e:
+        print(f"Warning: Failed to fetch existing show memos from Simkl: {e}")
+        
+    return memo_dict
+
+def get_simkl_show_memo(client_id, access_token, tmdb_id=None, imdb_id=None, title=None, dry_run=False):
+    global _cached_simkl_show_memos
+    if _cached_simkl_show_memos is None:
+        if dry_run or not client_id or not access_token:
+            _cached_simkl_show_memos = {}
+        else:
+            _cached_simkl_show_memos = fetch_all_simkl_show_memos(client_id, access_token)
+        
+    if imdb_id and f"imdb:{imdb_id}" in _cached_simkl_show_memos:
+        return _cached_simkl_show_memos[f"imdb:{imdb_id}"]
+    if tmdb_id and f"tmdb:{tmdb_id}" in _cached_simkl_show_memos:
+        return _cached_simkl_show_memos[f"tmdb:{tmdb_id}"]
+    if title and f"title:{title.strip().lower()}" in _cached_simkl_show_memos:
+        return _cached_simkl_show_memos[f"title:{title.strip().lower()}"]
+    return None
+
+def update_cached_simkl_show_memo(new_memo, tmdb_id=None, imdb_id=None, title=None):
+    global _cached_simkl_show_memos
+    if _cached_simkl_show_memos is None:
+        _cached_simkl_show_memos = {}
+    if imdb_id:
+        _cached_simkl_show_memos[f"imdb:{imdb_id}"] = new_memo
+    if tmdb_id:
+        _cached_simkl_show_memos[f"tmdb:{tmdb_id}"] = new_memo
+    if title:
+        _cached_simkl_show_memos[f"title:{title.strip().lower()}"] = new_memo
+
 def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=None, year=None, rating=None, memo=None, watched_at=None, dry_run=False):
     client_id = os.environ.get("SIMKL_CLIENT_ID")
     refresh_token = os.environ.get("SIMKL_REFRESH_TOKEN")
@@ -537,8 +706,21 @@ def sync_to_simkl(tmdb_id, imdb_id, media_type, season_number, action, title=Non
     if rating is not None:
         item_obj["rating"] = rating
     if memo:
-        truncated_memo = memo if len(memo) <= 140 else memo[:137] + "..."
-        item_obj["memo"] = {"text": truncated_memo}
+        if media_type == "show":
+            existing_memo = get_simkl_show_memo(
+                client_id=client_id,
+                access_token=access_token,
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+                title=title,
+                dry_run=dry_run
+            )
+            final_memo = merge_show_memo(existing_memo, memo, season_number)
+            item_obj["memo"] = {"text": final_memo}
+            update_cached_simkl_show_memo(final_memo, tmdb_id=tmdb_id, imdb_id=imdb_id, title=title)
+        else:
+            truncated_memo = memo if len(memo) <= 140 else memo[:137] + "..."
+            item_obj["memo"] = {"text": truncated_memo}
         
     # Construct list wrapper (movies or shows)
     plural_type = media_type + "s" # "movies" or "shows"
@@ -680,6 +862,16 @@ def main():
         # Try TMDB first
         tmdb_id, media_type, season_number, parent_imdb_id = resolve_tmdb(item['title'], item['original_title'], imdb_id)
         
+        # If TMDB returned a show but without a specific season, parse season from Chinese or English title
+        if media_type == "show" and season_number is None:
+            clean_title, parsed_season = clean_title_for_search(item['title'])
+            if parsed_season is not None:
+                season_number = parsed_season
+            elif item.get('original_title'):
+                _, parsed_orig_season = clean_title_for_search(item['original_title'])
+                if parsed_orig_season is not None:
+                    season_number = parsed_orig_season
+
         # If TMDB failed but we have IMDb ID, resolve type via Simkl or title heuristics
         if not media_type and imdb_id:
             print("TMDB resolution failed or keys not set. Resolving type via Simkl lookup...")
